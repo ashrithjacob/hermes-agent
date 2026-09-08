@@ -400,9 +400,15 @@ class OpenAICompatRoutesMixin:
             # the stream early. Called from the run_conversation worker thread: put_threadsafe.
             if delta is not None:
                 stream_q.put_threadsafe(delta)
+        def _on_reasoning(text):
+            # Tagged like __tool_progress__ so the SSE writer can tell reasoning
+            # deltas from answer deltas on one queue. Worker thread: put_threadsafe.
+            if text:
+                stream_q.put_threadsafe(("__reasoning__", text))
         agent_ref = [None]
         agent_task = asyncio.ensure_future(self._run_agent(
-            stream_delta_callback=_on_delta, agent_ref=agent_ref, **run_kwargs))
+            stream_delta_callback=_on_delta, reasoning_callback=_on_reasoning,
+            agent_ref=agent_ref, **run_kwargs))
         agent_task.add_done_callback(lambda _fut: stream_q.put_nowait(None))
         return agent_task, agent_ref
 
@@ -629,7 +635,11 @@ class OpenAICompatRoutesMixin:
             async for delta in _iter_stream_items(stream_q, agent_task, response):
                 if delta is None:
                     break
-                if isinstance(delta, tuple) and len(delta) == 2 and delta[0] == "__tool_progress__":
+                if isinstance(delta, tuple) and len(delta) == 2 and delta[0] == "__reasoning__":
+                    # delta.reasoning_content is the spelling Open WebUI, agentchat
+                    # and llama.cpp all read; it is ignored by clients that don't.
+                    await response.write(_sse_frame(_chunk({"reasoning_content": delta[1]})))
+                elif isinstance(delta, tuple) and len(delta) == 2 and delta[0] == "__tool_progress__":
                     # Custom event: tool lifecycle for frontends without markers in history.
                     await response.write(_sse_frame(delta[1], event="hermes.tool.progress"))
                 else:
